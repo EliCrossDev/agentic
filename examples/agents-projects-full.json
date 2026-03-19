@@ -1,0 +1,35 @@
+{
+  "projects": [
+    {
+      "name": "WebApp",
+      "main_dir": "~/code/webapp",
+      "specialists": [
+        "~/code/webapp-frontend",
+        "~/code/webapp-backend",
+        "~/code/webapp-api",
+        "~/code/webapp-tests"
+      ]
+    },
+    {
+      "name": "MobileApp",
+      "main_dir": "~/code/mobile",
+      "specialists": [
+        "~/code/mobile-ios",
+        "~/code/mobile-android",
+        "~/code/mobile-shared"
+      ]
+    },
+    {
+      "name": "AudioPlugin",
+      "main_dir": "~/code/AudioPlugin",
+      "specialists": [
+        "~/code/plugin-dsp",
+        "~/code/plugin-ui",
+        "~/code/plugin-synth",
+        "~/code/plugin-effects",
+        "~/code/plugin-presets",
+        "~/code/plugin-tests"
+      ]
+    }
+  ]
+}

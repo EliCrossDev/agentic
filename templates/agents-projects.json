@@ -1,0 +1,13 @@
+{
+  "projects": [
+    {
+      "name": "MyProject",
+      "main_dir": "~/code/MyProject",
+      "specialists": [
+        "~/code/myproject-frontend",
+        "~/code/myproject-backend",
+        "~/code/myproject-tests"
+      ]
+    }
+  ]
+}

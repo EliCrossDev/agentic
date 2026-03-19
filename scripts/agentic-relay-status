@@ -1,0 +1,35 @@
+#!/bin/bash
+# Tmux status bar widget for agentic-relay
+# Called by tmux status-right every 5 seconds
+# Outputs short string like [relay:3/3] or empty if not active
+
+RELAY_BASE="/tmp/agentic-relay"
+
+# Quick exit if no relay data
+[ -d "$RELAY_BASE" ] || exit 0
+
+output=""
+for pdir in "$RELAY_BASE"/*/; do
+    [ -d "$pdir" ] || continue
+    pidfile="$pdir/relay.pid"
+    [ -f "$pidfile" ] || continue
+
+    pid=$(cat "$pidfile" 2>/dev/null)
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || continue
+
+    # Watcher is running - count status
+    sent=$(ls "$pdir/sent/"*.prompt 2>/dev/null | wc -l | tr -d ' ')
+    pending=$(ls "$pdir/queue/"*.prompt 2>/dev/null | wc -l | tr -d ' ')
+    total=$((sent + pending))
+
+    if [ -f "$pdir/BATCH_DONE" ]; then
+        output="#[fg=green][relay:${sent}/${total}✓]#[default]"
+    elif [ $total -gt 0 ]; then
+        output="#[fg=cyan][relay:${sent}/${total}]#[default]"
+    else
+        output="#[fg=cyan][relay:on]#[default]"
+    fi
+    break  # Only show first active project
+done
+
+echo -n "$output"

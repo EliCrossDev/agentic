@@ -1,0 +1,2 @@
+export CLAUDE_AGENT_ROLE="your-role-here"
+export PROJECT_NAME="YourProject"

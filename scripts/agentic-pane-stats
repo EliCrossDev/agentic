@@ -1,0 +1,65 @@
+#!/bin/bash
+# Display token stats for a specific pane in tmux border
+# Usage: agentic-pane-stats %pane_id
+
+PANE_ID="${1:-}"
+METRICS_FILE="$HOME/.config/agentic-metrics.json"
+CONFIG_FILE="$HOME/.config/agentic-config.json"
+
+# Check if display is enabled (default: true if not set)
+if [ -f "$CONFIG_FILE" ]; then
+    ENABLED=$(jq -r 'if .show_token_stats == false then "false" else "true" end' "$CONFIG_FILE" 2>/dev/null)
+    if [ "$ENABLED" = "false" ]; then
+        echo ""
+        exit 0
+    fi
+fi
+
+# Quick exit if no metrics file
+if [ ! -f "$METRICS_FILE" ]; then
+    echo ""
+    exit 0
+fi
+
+# Use tmux session creation time as session key (matches capture-tokens hook)
+SESSION_CREATED=$(tmux display-message -p '#{session_created}' 2>/dev/null)
+if [ -n "$SESSION_CREATED" ]; then
+    SESSION_KEY=$(date -u -r "$SESSION_CREATED" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
+else
+    SESSION_KEY=$(date -u +"%Y-%m-%dT%H:00:00Z")
+fi
+
+# Find agent data for this pane
+STATS=$(jq -r --arg session "$SESSION_KEY" --arg pane "$PANE_ID" '
+    .sessions[$session].agents | to_entries[] |
+    select(.value.pane_id == $pane) |
+    "\(.value.total_input) \(.value.total_output) \(.value.cache_read)"
+' "$METRICS_FILE" 2>/dev/null | head -1)
+
+if [ -z "$STATS" ]; then
+    echo ""
+    exit 0
+fi
+
+read INPUT OUTPUT CACHE <<< "$STATS"
+
+# Format numbers (K for thousands)
+format_num() {
+    local num=$1
+    if [ "$num" -ge 1000000 ]; then
+        printf "%.1fM" $(echo "scale=1; $num/1000000" | bc)
+    elif [ "$num" -ge 1000 ]; then
+        printf "%.1fk" $(echo "scale=1; $num/1000" | bc)
+    else
+        echo "$num"
+    fi
+}
+
+# Calculate estimated cost (Claude pricing: ~$3/1M input, ~$15/1M output)
+# For Sonnet: $3/1M input, $15/1M output; cached reads are 90% cheaper
+INPUT_COST=$(echo "scale=6; ($INPUT - $CACHE) * 0.000003 + $CACHE * 0.0000003" | bc)
+OUTPUT_COST=$(echo "scale=6; $OUTPUT * 0.000015" | bc)
+TOTAL_COST=$(printf "%.2f" $(echo "$INPUT_COST + $OUTPUT_COST" | bc))
+
+# Format output for pane border
+echo "↓$(format_num $INPUT) ↑$(format_num $OUTPUT) \$${TOTAL_COST}"

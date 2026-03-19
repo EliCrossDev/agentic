@@ -1,0 +1,25 @@
+# Environment files
+.env
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Node
+node_modules/
+package-lock.json
+bun.lockb
+
+# Logs
+*.log
+
+# Temp files
+/tmp/

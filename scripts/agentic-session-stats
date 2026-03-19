@@ -1,0 +1,80 @@
+#!/bin/bash
+# Display total session token stats for tmux status bar
+# Shows: Agentic cost vs Single-agent estimate
+
+METRICS_FILE="$HOME/.config/agentic-metrics.json"
+CONFIG_FILE="$HOME/.config/agentic-config.json"
+
+# Check if display is enabled (default: true if not set)
+if [ -f "$CONFIG_FILE" ]; then
+    ENABLED=$(jq -r 'if .show_token_stats == false then "false" else "true" end' "$CONFIG_FILE" 2>/dev/null)
+    if [ "$ENABLED" = "false" ]; then
+        echo ""
+        exit 0
+    fi
+fi
+
+# Quick exit if no metrics file
+if [ ! -f "$METRICS_FILE" ]; then
+    echo ""
+    exit 0
+fi
+
+# Use tmux session creation time as session key (matches capture-tokens hook)
+SESSION_CREATED=$(tmux display-message -p '#{session_created}' 2>/dev/null)
+if [ -n "$SESSION_CREATED" ]; then
+    SESSION_KEY=$(date -u -r "$SESSION_CREATED" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
+else
+    SESSION_KEY=$(date -u +"%Y-%m-%dT%H:00:00Z")
+fi
+
+# Get session totals and count of agents that actually have token usage
+STATS=$(jq -r --arg session "$SESSION_KEY" '
+    .sessions[$session] |
+    "\(.totals.input // 0) \(.totals.output // 0) \(.totals.cache_read // 0) \([.agents | to_entries[] | select(.value.total_input > 0 or .value.total_output > 0)] | length)"
+' "$METRICS_FILE" 2>/dev/null)
+
+if [ -z "$STATS" ] || [ "$STATS" = "null null null null" ]; then
+    echo ""
+    exit 0
+fi
+
+read INPUT OUTPUT CACHE ACTIVE_AGENTS <<< "$STATS"
+
+# Handle nulls
+INPUT=${INPUT:-0}
+OUTPUT=${OUTPUT:-0}
+CACHE=${CACHE:-0}
+ACTIVE_AGENTS=${ACTIVE_AGENTS:-1}
+[ "$ACTIVE_AGENTS" -lt 1 ] 2>/dev/null && ACTIVE_AGENTS=1
+
+# Skip if no real data yet
+if [ "$INPUT" = "0" ] && [ "$OUTPUT" = "0" ]; then
+    echo ""
+    exit 0
+fi
+
+# Sonnet pricing per million tokens:
+# Input: $3, Output: $15, Cache read: $0.30 (90% discount)
+
+# AGENTIC cost: actual cost paid (cache discounts are an API feature, not agentic)
+AGENTIC_INPUT_COST=$(echo "scale=6; $INPUT * 0.000003 + $CACHE * 0.0000003" | bc 2>/dev/null || echo "0")
+AGENTIC_OUTPUT_COST=$(echo "scale=6; $OUTPUT * 0.000015" | bc 2>/dev/null || echo "0")
+AGENTIC_COST=$(printf "%.2f" $(echo "$AGENTIC_INPUT_COST + $AGENTIC_OUTPUT_COST" | bc 2>/dev/null || echo "0"))
+
+# SINGLE-AGENT estimate:
+# When only 1 agent works: same as agentic (no multi-agent benefit)
+# When N agents work: a single agent would carry ALL agents' context in one window,
+# so input tokens scale by N (each call includes everything instead of a slice)
+# Cache discounts still apply (it's an API feature either way)
+if [ "$ACTIVE_AGENTS" -le 1 ]; then
+    SINGLE_COST="$AGENTIC_COST"
+else
+    TOTAL_INPUT=$((INPUT + CACHE))
+    SINGLE_INPUT_COST=$(echo "scale=6; $TOTAL_INPUT * $ACTIVE_AGENTS * 0.000003" | bc 2>/dev/null || echo "0")
+    SINGLE_OUTPUT_COST=$(echo "scale=6; $OUTPUT * 0.000015" | bc 2>/dev/null || echo "0")
+    SINGLE_COST=$(printf "%.2f" $(echo "$SINGLE_INPUT_COST + $SINGLE_OUTPUT_COST" | bc 2>/dev/null || echo "0"))
+fi
+
+# Format output with colors for tmux status bar
+echo "#[fg=brightgreen,bold]agentic \$${AGENTIC_COST}#[default] vs #[fg=brightred,bold]single \$${SINGLE_COST}#[default]"

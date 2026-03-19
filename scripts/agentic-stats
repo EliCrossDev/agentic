@@ -1,0 +1,302 @@
+#!/bin/bash
+# Agentic Multi-Agent Token Statistics CLI
+# Usage: agentic-stats [--history|--compare|--final|--reset|--toggle|--status]
+
+METRICS_FILE="$HOME/.config/agentic-metrics.json"
+CONFIG_FILE="$HOME/.config/agentic-config.json"
+
+# Check if token stats display is enabled (default: true)
+is_enabled() {
+    if [ -f "$CONFIG_FILE" ]; then
+        ENABLED=$(jq -r 'if .show_token_stats == false then "false" else "true" end' "$CONFIG_FILE" 2>/dev/null)
+        [ "$ENABLED" = "true" ]
+    else
+        return 0  # Default to enabled
+    fi
+}
+
+toggle_stats() {
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo '{"show_token_stats": true}' > "$CONFIG_FILE"
+    fi
+
+    CURRENT=$(jq -r '.show_token_stats // true' "$CONFIG_FILE" 2>/dev/null)
+    if [ "$CURRENT" = "true" ]; then
+        jq '.show_token_stats = false' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+        echo -e "${YELLOW}Token stats display: OFF${NC}"
+        echo -e "${DIM}Stats will be hidden from tmux borders and status bar.${NC}"
+        echo -e "${DIM}Use 'agentic-stats' to still view reports manually.${NC}"
+    else
+        jq '.show_token_stats = true' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+        echo -e "${GREEN}Token stats display: ON${NC}"
+        echo -e "${DIM}Stats will show in tmux borders and status bar.${NC}"
+    fi
+}
+
+show_status() {
+    if is_enabled; then
+        echo -e "${GREEN}Token stats display: ON${NC}"
+    else
+        echo -e "${YELLOW}Token stats display: OFF${NC}"
+    fi
+}
+
+# Colors
+CYAN='\033[0;36m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+DIM='\033[0;90m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# Format numbers with K/M suffix
+format_num() {
+    local num=$1
+    if [ "$num" -ge 1000000 ]; then
+        printf "%6.1fM" $(echo "scale=1; $num/1000000" | bc)
+    elif [ "$num" -ge 1000 ]; then
+        printf "%6.1fk" $(echo "scale=1; $num/1000" | bc)
+    else
+        printf "%7d" "$num"
+    fi
+}
+
+# Calculate cost (Claude Sonnet pricing)
+# input = fresh tokens, cache = cached tokens (90% discount)
+calc_cost() {
+    local input=$1
+    local output=$2
+    local cache=${3:-0}
+    local input_cost=$(echo "scale=6; $input * 0.000003 + $cache * 0.0000003" | bc)
+    local output_cost=$(echo "scale=6; $output * 0.000015" | bc)
+    printf "%.2f" $(echo "$input_cost + $output_cost" | bc)
+}
+
+show_current_session() {
+    if [ ! -f "$METRICS_FILE" ]; then
+        echo -e "${DIM}No metrics data found.${NC}"
+        exit 0
+    fi
+
+    SESSION_START=$(date -u +"%Y-%m-%dT%H:00:00Z")
+
+    # Get session data
+    SESSION_DATA=$(jq -r --arg session "$SESSION_START" '.sessions[$session]' "$METRICS_FILE" 2>/dev/null)
+
+    if [ "$SESSION_DATA" = "null" ] || [ -z "$SESSION_DATA" ]; then
+        echo -e "${DIM}No current session data.${NC}"
+        exit 0
+    fi
+
+    PROJECT=$(echo "$SESSION_DATA" | jq -r '.project // "Unknown"')
+    STARTED=$(echo "$SESSION_DATA" | jq -r '.started // ""')
+
+    # Calculate duration (timestamps are UTC)
+    if [ -n "$STARTED" ]; then
+        # Parse UTC timestamp and convert to epoch
+        START_TS=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$STARTED" "+%s" 2>/dev/null || echo "0")
+        NOW_TS=$(date "+%s")
+        if [ "$START_TS" -gt 0 ]; then
+            DURATION_SEC=$((NOW_TS - START_TS))
+            DURATION_MIN=$((DURATION_SEC / 60))
+            DURATION_HR=$((DURATION_MIN / 60))
+            DURATION_MIN=$((DURATION_MIN % 60))
+            DURATION="${DURATION_HR}h ${DURATION_MIN}m"
+        else
+            DURATION="--"
+        fi
+    else
+        DURATION="--"
+    fi
+
+    echo ""
+    echo -e "${BOLD}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}  AGENTIC SESSION REPORT - ${CYAN}$PROJECT${NC}"
+    # Convert UTC timestamp to local time for display
+    if [ -n "$STARTED" ]; then
+        LOCAL_START=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%SZ" "$STARTED" "+%s" 2>/dev/null | xargs -I{} date -r {} "+%Y-%m-%d %H:%M")
+    else
+        LOCAL_START="--"
+    fi
+    echo -e "${DIM}  Duration: $DURATION │ Started: $LOCAL_START${NC}"
+    echo -e "${BOLD}═══════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${BOLD}  AGENT BREAKDOWN${NC}"
+    echo -e "${DIM}  ───────────────────────────────────────────────────${NC}"
+    echo -e "${DIM}  FRESH = new tokens sent │ RESPONSE = tokens received${NC}"
+    echo -e "${DIM}  CACHED = reused context (90% cheaper!)${NC}"
+    echo -e "${DIM}  ───────────────────────────────────────────────────${NC}"
+
+    # Print each agent's stats
+    printf "${DIM}  %-12s %8s  %8s  %8s  %6s${NC}\n" "AGENT" "FRESH" "RESPONSE" "CACHED" "COST"
+    echo -e "${DIM}  ───────────────────────────────────────────────────${NC}"
+
+    TOTAL_INPUT=0
+    TOTAL_OUTPUT=0
+    TOTAL_CACHE=0
+
+    while IFS= read -r line; do
+        AGENT=$(echo "$line" | jq -r '.key')
+        INPUT=$(echo "$line" | jq -r '.value.total_input // 0')
+        OUTPUT=$(echo "$line" | jq -r '.value.total_output // 0')
+        CACHE=$(echo "$line" | jq -r '.value.cache_read // 0')
+
+        COST=$(calc_cost $INPUT $OUTPUT $CACHE)
+
+        printf "  ${GREEN}%-12s${NC} %s  %s  %s  ${YELLOW}\$%5.2f${NC}\n" \
+            "$AGENT" "$(format_num $INPUT)" "$(format_num $OUTPUT)" "$(format_num $CACHE)" "$COST"
+
+        TOTAL_INPUT=$((TOTAL_INPUT + INPUT))
+        TOTAL_OUTPUT=$((TOTAL_OUTPUT + OUTPUT))
+        TOTAL_CACHE=$((TOTAL_CACHE + CACHE))
+    done < <(echo "$SESSION_DATA" | jq -c '.agents | to_entries[]')
+
+    TOTAL_COST=$(calc_cost $TOTAL_INPUT $TOTAL_OUTPUT $TOTAL_CACHE)
+
+    echo -e "${DIM}  ───────────────────────────────────────────────────${NC}"
+    printf "  ${BOLD}%-12s${NC} %s  %s  %s  ${YELLOW}${BOLD}\$%5.2f${NC}\n" \
+        "TOTAL" "$(format_num $TOTAL_INPUT)" "$(format_num $TOTAL_OUTPUT)" "$(format_num $TOTAL_CACHE)" "$TOTAL_COST"
+    echo ""
+
+    # Cost comparison
+    if [ "$TOTAL_INPUT" -gt 0 ] || [ "$TOTAL_CACHE" -gt 0 ]; then
+        # AGENTIC: fresh input at full price, cache reads at 90% discount
+        AGENTIC_INPUT_COST=$(echo "scale=6; $TOTAL_INPUT * 0.000003 + $TOTAL_CACHE * 0.0000003" | bc)
+        AGENTIC_OUTPUT_COST=$(echo "scale=6; $TOTAL_OUTPUT * 0.000015" | bc)
+        AGENTIC_TOTAL=$(printf "%.2f" $(echo "$AGENTIC_INPUT_COST + $AGENTIC_OUTPUT_COST" | bc))
+
+        # SINGLE-AGENT: no cache, ALL context at full input price
+        TOTAL_CONTEXT=$((TOTAL_INPUT + TOTAL_CACHE))
+        SINGLE_INPUT_COST=$(echo "scale=6; $TOTAL_CONTEXT * 0.000003" | bc)
+        SINGLE_OUTPUT_COST=$(echo "scale=6; $TOTAL_OUTPUT * 0.000015" | bc)
+        SINGLE_TOTAL=$(printf "%.2f" $(echo "$SINGLE_INPUT_COST + $SINGLE_OUTPUT_COST" | bc))
+
+        # Calculate savings
+        SAVINGS=$(printf "%.2f" $(echo "$SINGLE_TOTAL - $AGENTIC_TOTAL" | bc))
+        if [ "$(echo "$SINGLE_TOTAL > 0" | bc)" -eq 1 ]; then
+            SAVINGS_PCT=$(echo "scale=0; $SAVINGS * 100 / $SINGLE_TOTAL" | bc 2>/dev/null || echo "0")
+        else
+            SAVINGS_PCT=0
+        fi
+
+        echo -e "${BOLD}  ┌─────────────────────────────────────────────────┐${NC}"
+        echo -e "${BOLD}  │            COST COMPARISON                      │${NC}"
+        echo -e "${BOLD}  ├─────────────────────────────────────────────────┤${NC}"
+        echo -e "${BOLD}  │                                                 │${NC}"
+        printf   "  │   ${CYAN}%-18s${NC}          ${YELLOW}${BOLD}\$%-8s${NC}     │\n" "AGENTIC (actual)" "$AGENTIC_TOTAL"
+        echo -e "${BOLD}  │                                                 │${NC}"
+        printf   "  │   ${DIM}%-18s${NC}          ${DIM}\$%-8s${NC}     │\n" "Single-agent (est)" "$SINGLE_TOTAL"
+        echo -e "${BOLD}  │                                                 │${NC}"
+        echo -e "${BOLD}  ├─────────────────────────────────────────────────┤${NC}"
+        printf   "  │   ${GREEN}${BOLD}YOU SAVED${NC}              ${GREEN}${BOLD}\$%-6s  (%s%%)${NC}   │\n" "$SAVINGS" "$SAVINGS_PCT"
+        echo -e "${BOLD}  └─────────────────────────────────────────────────┘${NC}"
+        echo ""
+
+        # Why the savings?
+        CACHE_RATE=$(echo "scale=1; $TOTAL_CACHE * 100 / $TOTAL_INPUT" | bc)
+        AGENT_COUNT=$(echo "$SESSION_DATA" | jq '.agents | length')
+        echo -e "${DIM}  Why? ${AGENT_COUNT} agents sharing cache (${CACHE_RATE}% cache hits)${NC}"
+        echo -e "${DIM}  Single agent = no cache + growing context per task${NC}"
+    fi
+
+    echo ""
+}
+
+show_history() {
+    if [ ! -f "$METRICS_FILE" ]; then
+        echo -e "${DIM}No metrics history found.${NC}"
+        exit 0
+    fi
+
+    echo ""
+    echo -e "${BOLD}═══════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}  AGENTIC SESSION HISTORY${NC}"
+    echo -e "${BOLD}═══════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    printf "${DIM}  %-20s %-15s %10s %10s %8s${NC}\n" "SESSION" "PROJECT" "INPUT↓" "OUTPUT↑" "COST"
+    echo -e "${DIM}  ───────────────────────────────────────────────────────────${NC}"
+
+    jq -r '.sessions | to_entries | sort_by(.key) | reverse | .[] |
+        "\(.key)\t\(.value.project // "Unknown")\t\(.value.totals.input // 0)\t\(.value.totals.output // 0)\t\(.value.totals.cache_read // 0)"
+    ' "$METRICS_FILE" 2>/dev/null | while IFS=$'\t' read -r session project input output cache; do
+        COST=$(calc_cost $input $output $cache)
+        SESSION_SHORT=$(echo "$session" | cut -d'T' -f1,2 | tr 'T' ' ' | cut -c1-16)
+        printf "  %-20s ${CYAN}%-15s${NC} %s %s ${YELLOW}\$%6.2f${NC}\n" \
+            "$SESSION_SHORT" "${project:0:15}" "$(format_num $input)" "$(format_num $output)" "$COST"
+    done
+
+    echo ""
+}
+
+show_final() {
+    show_current_session
+    echo -e "${DIM}Session ended. Thank you for using Agentic!${NC}"
+    echo ""
+}
+
+reset_metrics() {
+    if [ -f "$METRICS_FILE" ]; then
+        rm "$METRICS_FILE"
+        echo -e "${GREEN}Metrics reset.${NC}"
+    else
+        echo -e "${DIM}No metrics to reset.${NC}"
+    fi
+}
+
+# Parse arguments
+case "${1:-}" in
+    --history|-h)
+        show_history
+        ;;
+    --compare|-c)
+        show_current_session
+        ;;
+    --final|-f)
+        show_final
+        ;;
+    --reset|-r)
+        reset_metrics
+        ;;
+    --toggle|-t)
+        toggle_stats
+        ;;
+    --on)
+        if [ ! -f "$CONFIG_FILE" ]; then
+            echo '{"show_token_stats": true}' > "$CONFIG_FILE"
+        else
+            jq '.show_token_stats = true' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+        fi
+        echo -e "${GREEN}Token stats display: ON${NC}"
+        ;;
+    --off)
+        if [ ! -f "$CONFIG_FILE" ]; then
+            echo '{"show_token_stats": false}' > "$CONFIG_FILE"
+        else
+            jq '.show_token_stats = false' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
+        fi
+        echo -e "${YELLOW}Token stats display: OFF${NC}"
+        ;;
+    --status|-s)
+        show_status
+        ;;
+    --help)
+        echo "Usage: agentic-stats [OPTION]"
+        echo ""
+        echo "Options:"
+        echo "  (none)      Show current session stats"
+        echo "  --history   Show all session history"
+        echo "  --compare   Show comparison with single-agent estimate"
+        echo "  --final     Show final report (for session end)"
+        echo "  --reset     Clear all metrics data"
+        echo "  --toggle    Toggle token stats display on/off"
+        echo "  --on        Enable token stats display"
+        echo "  --off       Disable token stats display"
+        echo "  --status    Show current display setting"
+        echo "  --help      Show this help"
+        ;;
+    *)
+        show_current_session
+        ;;
+esac

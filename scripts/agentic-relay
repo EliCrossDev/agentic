@@ -1,0 +1,359 @@
+#!/bin/bash
+# ═══════════════════════════════════════════════════════════════════════════════
+# AGENTIC RELAY - File-based auto-relay for QB → specialist prompt distribution
+# Usage: agentic-relay start --project NAME
+#        agentic-relay stop --project NAME
+#        agentic-relay status [--project NAME]
+# ═══════════════════════════════════════════════════════════════════════════════
+
+RELAY_BASE="/tmp/agentic-relay"
+SESSION="agentic"
+POLL_INTERVAL=2
+COMMIT_SUFFIX="Commit all changes when you finish. Do not test."
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+log() {
+    local project="$1" msg="$2"
+    local logfile="$RELAY_BASE/$project/relay.log"
+    echo "[$(date '+%H:%M:%S')] $msg" >> "$logfile"
+}
+
+die() { echo "Error: $1" >&2; exit 1; }
+
+get_project_dir() {
+    local project="$1"
+    echo "$RELAY_BASE/$project"
+}
+
+is_pane_ready() {
+    local target="$1"
+    local content
+    content=$(tmux capture-pane -t "$target" -p -S -10 2>/dev/null)
+    echo "$content" | grep -qE '(for shortcuts|bypass|❯)'
+}
+
+send_to_pane() {
+    local target="$1"
+    local text="$2"
+    local len=${#text}
+
+    if [ $len -gt 500 ]; then
+        # Large prompt: use load-buffer/paste-buffer
+        local tmpfile
+        tmpfile=$(mktemp /tmp/relay-prompt-XXXXXX)
+        printf '%s' "$text" > "$tmpfile"
+        tmux load-buffer "$tmpfile"
+        tmux paste-buffer -t "$target"
+        sleep 0.3
+        tmux send-keys -t "$target" Enter
+        rm -f "$tmpfile"
+    else
+        tmux send-keys -t "$target" "$text" Enter
+    fi
+}
+
+cleanup_stale_pid() {
+    local project="$1"
+    local pidfile="$RELAY_BASE/$project/relay.pid"
+    if [ -f "$pidfile" ]; then
+        local old_pid
+        old_pid=$(cat "$pidfile" 2>/dev/null)
+        if [ -n "$old_pid" ] && ! kill -0 "$old_pid" 2>/dev/null; then
+            log "$project" "Cleaning stale PID file (pid=$old_pid)"
+            rm -f "$pidfile"
+        fi
+    fi
+}
+
+# ─── START ────────────────────────────────────────────────────────────────────
+
+cmd_start() {
+    local project=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --project) project="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [ -z "$project" ] && die "Usage: agentic-relay start --project NAME"
+
+    local dir
+    dir=$(get_project_dir "$project")
+    mkdir -p "$dir/queue" "$dir/sent"
+
+    # Check for stale PID
+    cleanup_stale_pid "$project"
+
+    # Check if already running
+    if [ -f "$dir/relay.pid" ]; then
+        local existing_pid
+        existing_pid=$(cat "$dir/relay.pid" 2>/dev/null)
+        if kill -0 "$existing_pid" 2>/dev/null; then
+            echo "Relay already running for $project (pid=$existing_pid)"
+            exit 0
+        fi
+    fi
+
+    # Verify pane map exists
+    if [ ! -f "$dir/pane-map.json" ]; then
+        die "No pane-map.json found for $project. Start agentic with auto-relay enabled."
+    fi
+
+    # Fork into background
+    echo "Starting relay watcher for $project..."
+    nohup bash -c "$(cat <<'WATCHER_SCRIPT'
+project="$1"
+dir="$2"
+SESSION="$3"
+POLL_INTERVAL="$4"
+COMMIT_SUFFIX="$5"
+
+# Write PID
+echo $$ > "$dir/relay.pid"
+
+log_relay() {
+    echo "[$(date '+%H:%M:%S')] $1" >> "$dir/relay.log"
+}
+
+log_relay "Relay watcher started (pid=$$)"
+
+# Trap for clean exit
+trap 'log_relay "Relay watcher stopping"; rm -f "$dir/relay.pid"; exit 0' SIGTERM SIGINT
+
+is_pane_ready() {
+    local target="$1"
+    local content
+    content=$(tmux capture-pane -t "$target" -p -S -10 2>/dev/null)
+    echo "$content" | grep -qE '(for shortcuts|bypass|❯)'
+}
+
+send_to_pane() {
+    local target="$1"
+    local text="$2"
+    local len=${#text}
+
+    if [ $len -gt 500 ]; then
+        local tmpfile
+        tmpfile=$(mktemp /tmp/relay-prompt-XXXXXX)
+        printf '%s' "$text" > "$tmpfile"
+        tmux load-buffer "$tmpfile"
+        tmux paste-buffer -t "$target"
+        sleep 0.3
+        tmux send-keys -t "$target" Enter
+        rm -f "$tmpfile"
+    else
+        tmux send-keys -t "$target" "$text" Enter
+    fi
+}
+
+# Main poll loop
+while true; do
+    # Check if READY trigger exists
+    if [ -f "$dir/queue/READY" ]; then
+        log_relay "READY trigger found - dispatching batch"
+
+        dispatched=0
+        skipped=0
+        total=0
+
+        # Process all .prompt files
+        for promptfile in "$dir/queue"/*.prompt; do
+            [ -f "$promptfile" ] || continue
+            total=$((total + 1))
+
+            # Extract specialist name: 001-frontend.prompt -> frontend
+            filename=$(basename "$promptfile")
+            specialist=$(echo "$filename" | sed 's/^[0-9]*-//; s/\.prompt$//')
+
+            # Look up pane target from pane-map.json
+            pane_target=$(jq -r ".\"$specialist\" // empty" "$dir/pane-map.json" 2>/dev/null)
+
+            if [ -z "$pane_target" ]; then
+                log_relay "SKIP $filename: no pane mapping for '$specialist'"
+                skipped=$((skipped + 1))
+                continue
+            fi
+
+            # Check pane readiness
+            if ! is_pane_ready "$pane_target"; then
+                log_relay "SKIP $filename: pane $pane_target not ready (will retry next cycle)"
+                skipped=$((skipped + 1))
+                continue
+            fi
+
+            # Read prompt and append commit suffix
+            prompt_text=$(cat "$promptfile")
+            prompt_text="$prompt_text
+
+$COMMIT_SUFFIX"
+
+            # Deliver to pane
+            send_to_pane "$pane_target" "$prompt_text"
+            log_relay "SENT $filename -> $pane_target ($specialist)"
+
+            # Move to sent/
+            mv "$promptfile" "$dir/sent/$filename"
+            dispatched=$((dispatched + 1))
+        done
+
+        # If all dispatched (none skipped), mark batch done
+        if [ $skipped -eq 0 ]; then
+            mv "$dir/queue/READY" "$dir/queue/READY.processed"
+            log_relay "Batch complete: $dispatched/$total dispatched"
+        else
+            log_relay "Batch partial: $dispatched dispatched, $skipped skipped (will retry)"
+        fi
+    fi
+
+    # Monitor for completion: check if all specialists are idle
+    sent_count=$(ls "$dir/sent/"*.prompt 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$sent_count" -gt 0 ] && [ ! -f "$dir/BATCH_DONE" ]; then
+        all_done=true
+        for promptfile in "$dir/sent/"*.prompt; do
+            [ -f "$promptfile" ] || continue
+            filename=$(basename "$promptfile")
+            specialist=$(echo "$filename" | sed 's/^[0-9]*-//; s/\.prompt$//')
+            pane_target=$(jq -r ".\"$specialist\" // empty" "$dir/pane-map.json" 2>/dev/null)
+            [ -z "$pane_target" ] && continue
+
+            content=$(tmux capture-pane -t "$pane_target" -p -S -5 2>/dev/null)
+            if ! echo "$content" | grep -qE '(for shortcuts|bypass|❯)'; then
+                all_done=false
+                break
+            fi
+        done
+
+        if [ "$all_done" = true ]; then
+            touch "$dir/BATCH_DONE"
+            log_relay "ALL SPECIALISTS DONE - BATCH_DONE written"
+        fi
+    fi
+
+    sleep $POLL_INTERVAL
+done
+WATCHER_SCRIPT
+)" "$project" "$dir" "$SESSION" "$POLL_INTERVAL" "$COMMIT_SUFFIX" >/dev/null 2>&1 &
+
+    echo "Relay watcher started for $project (pid=$(cat "$dir/relay.pid" 2>/dev/null))"
+}
+
+# ─── STOP ─────────────────────────────────────────────────────────────────────
+
+cmd_stop() {
+    local project=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --project) project="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    [ -z "$project" ] && die "Usage: agentic-relay stop --project NAME"
+
+    local dir
+    dir=$(get_project_dir "$project")
+    local pidfile="$dir/relay.pid"
+
+    if [ ! -f "$pidfile" ]; then
+        echo "No relay running for $project"
+        return 0
+    fi
+
+    local pid
+    pid=$(cat "$pidfile" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null
+        # Wait briefly for clean exit
+        for i in {1..10}; do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.2
+        done
+        echo "Relay stopped for $project (pid=$pid)"
+        log "$project" "Relay stopped by user"
+    else
+        echo "Relay not running (stale pid file cleaned)"
+    fi
+    rm -f "$pidfile"
+}
+
+# ─── STATUS ───────────────────────────────────────────────────────────────────
+
+cmd_status() {
+    local project=""
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --project) project="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    if [ -n "$project" ]; then
+        show_project_status "$project"
+    else
+        # Show status for all projects
+        if [ ! -d "$RELAY_BASE" ]; then
+            echo "No relay data found"
+            return 0
+        fi
+        local found=false
+        for pdir in "$RELAY_BASE"/*/; do
+            [ -d "$pdir" ] || continue
+            found=true
+            local pname
+            pname=$(basename "$pdir")
+            show_project_status "$pname"
+            echo ""
+        done
+        if [ "$found" = false ]; then
+            echo "No relay projects found"
+        fi
+    fi
+}
+
+show_project_status() {
+    local project="$1"
+    local dir
+    dir=$(get_project_dir "$project")
+
+    echo "=== $project ==="
+
+    # Watcher state
+    if [ -f "$dir/relay.pid" ]; then
+        local pid
+        pid=$(cat "$dir/relay.pid" 2>/dev/null)
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "  Watcher: RUNNING (pid=$pid)"
+        else
+            echo "  Watcher: STOPPED (stale pid)"
+        fi
+    else
+        echo "  Watcher: STOPPED"
+    fi
+
+    # Counts
+    local pending=0 sent=0
+    pending=$(ls "$dir/queue/"*.prompt 2>/dev/null | wc -l | tr -d ' ')
+    sent=$(ls "$dir/sent/"*.prompt 2>/dev/null | wc -l | tr -d ' ')
+
+    echo "  Pending: $pending"
+    echo "  Sent: $sent"
+
+    if [ -f "$dir/BATCH_DONE" ]; then
+        echo "  Status: BATCH DONE"
+    elif [ -f "$dir/queue/READY" ]; then
+        echo "  Status: READY (dispatching)"
+    elif [ -f "$dir/queue/READY.processed" ]; then
+        echo "  Status: Dispatched (monitoring)"
+    else
+        echo "  Status: Idle"
+    fi
+}
+
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    start)  shift; cmd_start "$@" ;;
+    stop)   shift; cmd_stop "$@" ;;
+    status) shift; cmd_status "$@" ;;
+    *)      echo "Usage: agentic-relay {start|stop|status} [--project NAME]"; exit 1 ;;
+esac
