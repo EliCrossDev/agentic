@@ -1,7 +1,8 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
 # Agentic Installer -- macOS and Linux
-# Installs scripts to ~/.local/bin/ and sets up initial configuration
+# Supports both: curl -fsSL https://raw.githubusercontent.com/EliCrossDev/agentic/main/install.sh | bash
+#            and: ./install.sh  (from a cloned repo)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 set -euo pipefail
@@ -17,6 +18,10 @@ NC='\033[0m'
 INSTALL_DIR="$HOME/.local/bin"
 CONFIG_DIR="$HOME/.config"
 CONFIG_FILE="$CONFIG_DIR/agents-projects.json"
+
+GITHUB_REPO="EliCrossDev/agentic"
+GITHUB_BRANCH="main"
+RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
 print_header() {
     echo ""
@@ -83,6 +88,12 @@ check_dependencies() {
         missing=1
     fi
 
+    # curl (needed for remote download)
+    if ! check_dependency curl "curl" \
+        "$([ "$OS" = "macos" ] && echo "brew install curl" || echo "sudo apt install curl  OR  sudo yum install curl")"; then
+        missing=1
+    fi
+
     # Claude CLI
     if ! check_dependency claude "Claude CLI" \
         "npm install -g @anthropic-ai/claude-code  (requires Claude Pro subscription)"; then
@@ -102,16 +113,39 @@ check_dependencies() {
     fi
 }
 
-# ─── Find Script Source Directory ─────────────────────────────────────────────
+# ─── Find Script Source Directory (local clone) ───────────────────────────────
 
 find_scripts_dir() {
-    # If running from a cloned repo, scripts are in ./scripts/
-    SCRIPT_SOURCE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    if [ -d "$SCRIPT_SOURCE/scripts" ]; then
-        SCRIPTS_DIR="$SCRIPT_SOURCE/scripts"
-        TEMPLATES_DIR="$SCRIPT_SOURCE/templates"
+    # BASH_SOURCE[0] is empty or /dev/stdin when piped via curl | bash
+    local script_path="${BASH_SOURCE[0]:-}"
+    if [ -n "$script_path" ] && [ "$script_path" != "/dev/stdin" ] && [ -f "$script_path" ]; then
+        local script_dir
+        script_dir="$(cd "$(dirname "$script_path")" && pwd)"
+        if [ -d "$script_dir/scripts" ]; then
+            SCRIPTS_DIR="$script_dir/scripts"
+            TEMPLATES_DIR="$script_dir/templates"
+            INSTALL_MODE="local"
+            info "Installing from local clone: $script_dir"
+            return 0
+        fi
+    fi
+    # Fall back to remote download
+    INSTALL_MODE="remote"
+    info "Installing from GitHub: ${GITHUB_REPO}@${GITHUB_BRANCH}"
+}
+
+# ─── Download a file from GitHub ─────────────────────────────────────────────
+
+download_file() {
+    local remote_path="$1"
+    local dest="$2"
+    local url="${RAW_BASE}/${remote_path}"
+
+    if curl -fsSL "$url" -o "$dest"; then
+        return 0
     else
-        fail "Cannot find scripts/ directory. Run this from the agentic repo root."
+        warn "Failed to download: $url"
+        return 1
     fi
 }
 
@@ -131,12 +165,23 @@ install_scripts() {
     )
 
     for script in "${scripts[@]}"; do
-        if [ -f "$SCRIPTS_DIR/$script" ]; then
-            cp "$SCRIPTS_DIR/$script" "$INSTALL_DIR/$script"
-            chmod +x "$INSTALL_DIR/$script"
-            success "Installed $script"
+        if [ "$INSTALL_MODE" = "local" ]; then
+            if [ -f "$SCRIPTS_DIR/$script" ]; then
+                cp "$SCRIPTS_DIR/$script" "$INSTALL_DIR/$script"
+                chmod +x "$INSTALL_DIR/$script"
+                success "Installed $script"
+            else
+                warn "Script not found: $script (skipping)"
+            fi
         else
-            warn "Script not found: $script (skipping)"
+            # Remote mode: download from GitHub
+            local dest="$INSTALL_DIR/$script"
+            if download_file "scripts/$script" "$dest"; then
+                chmod +x "$dest"
+                success "Installed $script"
+            else
+                warn "Could not install $script (skipping)"
+            fi
         fi
     done
 
@@ -147,6 +192,17 @@ install_scripts() {
         echo -e "    ${GRAY}Add this to your shell profile (~/.bashrc, ~/.zshrc, etc.):${NC}"
         echo -e "    ${GRAY}  export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
         echo ""
+        # Attempt to add to shell profile automatically
+        local shell_profile=""
+        if [ -n "${BASH_VERSION:-}" ] || [ "${SHELL:-}" = "/bin/bash" ]; then
+            shell_profile="$HOME/.bashrc"
+        elif [ -n "${ZSH_VERSION:-}" ] || [ "${SHELL:-}" = "/bin/zsh" ]; then
+            shell_profile="$HOME/.zshrc"
+        fi
+        if [ -n "$shell_profile" ]; then
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$shell_profile"
+            success "Added PATH entry to $shell_profile (restart your shell or run: source $shell_profile)"
+        fi
     fi
 }
 
@@ -157,13 +213,25 @@ install_config() {
 
     if [ -f "$CONFIG_FILE" ]; then
         info "Config already exists at $CONFIG_FILE (not overwriting)"
+        return
+    fi
+
+    local config_written=0
+
+    if [ "$INSTALL_MODE" = "local" ] && [ -f "$TEMPLATES_DIR/agents-projects.json" ]; then
+        cp "$TEMPLATES_DIR/agents-projects.json" "$CONFIG_FILE"
+        config_written=1
+    elif [ "$INSTALL_MODE" = "remote" ]; then
+        if download_file "templates/agents-projects.json" "$CONFIG_FILE"; then
+            config_written=1
+        fi
+    fi
+
+    if [ "$config_written" -eq 1 ]; then
+        success "Created config at $CONFIG_FILE"
     else
-        if [ -f "$TEMPLATES_DIR/agents-projects.json" ]; then
-            cp "$TEMPLATES_DIR/agents-projects.json" "$CONFIG_FILE"
-            success "Created config at $CONFIG_FILE"
-        else
-            # Create minimal config
-            cat > "$CONFIG_FILE" << 'EOF'
+        # Fallback: write minimal inline config
+        cat > "$CONFIG_FILE" << 'EOF'
 {
   "projects": [
     {
@@ -178,8 +246,7 @@ install_config() {
   ]
 }
 EOF
-            success "Created default config at $CONFIG_FILE"
-        fi
+        success "Created default config at $CONFIG_FILE"
     fi
 }
 
@@ -189,11 +256,22 @@ install_tmux_config() {
     if [ -f "$HOME/.tmux.conf" ]; then
         info "tmux config already exists at ~/.tmux.conf (not overwriting)"
         echo -e "    ${GRAY}See templates/tmux.conf for recommended settings${NC}"
-    else
-        if [ -f "$TEMPLATES_DIR/tmux.conf" ]; then
-            cp "$TEMPLATES_DIR/tmux.conf" "$HOME/.tmux.conf"
-            success "Installed tmux config to ~/.tmux.conf"
+        return
+    fi
+
+    local tmux_conf_written=0
+
+    if [ "$INSTALL_MODE" = "local" ] && [ -f "$TEMPLATES_DIR/tmux.conf" ]; then
+        cp "$TEMPLATES_DIR/tmux.conf" "$HOME/.tmux.conf"
+        tmux_conf_written=1
+    elif [ "$INSTALL_MODE" = "remote" ]; then
+        if download_file "templates/tmux.conf" "$HOME/.tmux.conf"; then
+            tmux_conf_written=1
         fi
+    fi
+
+    if [ "$tmux_conf_written" -eq 1 ]; then
+        success "Installed tmux config to ~/.tmux.conf"
     fi
 }
 
@@ -231,7 +309,7 @@ main() {
     echo -e "  3. Launch agentic:"
     echo -e "     ${CYAN}agentic${NC}"
     echo ""
-    echo -e "  ${GRAY}Documentation: see docs/ directory or README.md${NC}"
+    echo -e "  ${GRAY}Documentation: https://github.com/${GITHUB_REPO}${NC}"
     echo ""
 }
 
