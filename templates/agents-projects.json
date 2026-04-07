@@ -1,0 +1,11 @@
+{
+  "projects": [],
+  "settings": {
+    "slow_mode": false,
+    "dangerous_mode": true,
+    "auto_relay": true,
+    "solo_mode": true,
+    "multi_projects": "",
+    "auto_update": true
+  }
+}

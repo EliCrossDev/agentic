@@ -126,7 +126,7 @@ find_scripts_dir() {
     if [ -n "$script_path" ] && [ "$script_path" != "/dev/stdin" ] && [ -f "$script_path" ]; then
         local script_dir
         script_dir="$(cd "$(dirname "$script_path")" && pwd)"
-        if [ -d "$script_dir/scripts" ]; then
+        if [ -d "$script_dir/scripts" ] && [ -f "$script_dir/scripts/agentic" ]; then
             SCRIPTS_DIR="$script_dir/scripts"
             TEMPLATES_DIR="$script_dir/templates"
             INSTALL_MODE="local"
@@ -157,55 +157,36 @@ download_file() {
 # ─── Install Scripts ─────────────────────────────────────────────────────────
 
 install_scripts() {
-    info "Installing scripts to $INSTALL_DIR/ ..."
+    info "Installing agentic to $INSTALL_DIR/ ..."
     mkdir -p "$INSTALL_DIR"
 
-    if [ "$INSTALL_MODE" = "local" ]; then
+    if [ "$INSTALL_MODE" = "local" ] && [ -f "$SCRIPTS_DIR/agentic" ]; then
         # Local mode: copy from cloned repo
-        local scripts=(
-            "agentic"
-            "agentic-stats"
-            "agentic-session-stats"
-            "agentic-pane-stats"
-            "agentic-relay"
-            "agentic-relay-status"
-            "agentic-bulletin-write"
-            "agentic-skill-write"
-            "agentic-watcher"
-        )
-        for script in "${scripts[@]}"; do
-            if [ -f "$SCRIPTS_DIR/$script" ]; then
-                cp "$SCRIPTS_DIR/$script" "$INSTALL_DIR/$script"
-                chmod +x "$INSTALL_DIR/$script"
-                success "Installed $script"
-            else
-                warn "Script not found: $script (skipping)"
-            fi
-        done
+        cp "$SCRIPTS_DIR/agentic" "$INSTALL_DIR/agentic"
+        chmod +x "$INSTALL_DIR/agentic"
+        success "Installed agentic"
     else
-        # Remote mode: download compiled binaries from latest GitHub release
-        info "Downloading binaries from latest release..."
+        # Remote mode: download binary from latest GitHub release
+        info "Downloading agentic..."
         if [ "$OS" = "macos" ]; then
             local RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/agentic-macos-arm64.tar.gz"
         else
             local RELEASE_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/agentic-linux.tar.gz"
         fi
         local TEMP_DIR=$(mktemp -d)
-        local TARBALL="$TEMP_DIR/agentic.tar.gz"
 
-        if curl -fsSL "$RELEASE_URL" -o "$TARBALL" 2>/dev/null; then
-            tar -xzf "$TARBALL" -C "$TEMP_DIR"
-            for bin in "$TEMP_DIR"/*; do
-                local name=$(basename "$bin")
-                if [ "$name" != "agentic.tar.gz" ] && [ -f "$bin" ]; then
-                    cp "$bin" "$INSTALL_DIR/$name"
-                    chmod +x "$INSTALL_DIR/$name"
-                    success "Installed $name"
-                fi
-            done
+        if curl -fsSL "$RELEASE_URL" -o "$TEMP_DIR/agentic.tar.gz" 2>/dev/null; then
+            tar -xzf "$TEMP_DIR/agentic.tar.gz" -C "$TEMP_DIR"
+            if [ -f "$TEMP_DIR/agentic" ]; then
+                cp "$TEMP_DIR/agentic" "$INSTALL_DIR/agentic"
+                chmod +x "$INSTALL_DIR/agentic"
+                success "Installed agentic"
+            else
+                fail "Binary not found in release archive."
+            fi
             rm -rf "$TEMP_DIR"
         else
-            fail "Could not download release. Check your internet connection."
+            fail "Could not download agentic. Check your internet connection."
         fi
     fi
 
@@ -277,7 +258,7 @@ install_config() {
     "slow_mode": false,
     "dangerous_mode": true,
     "auto_relay": true,
-    "solo_mode": false,
+    "solo_mode": true,
     "multi_projects": ""
   }
 }
