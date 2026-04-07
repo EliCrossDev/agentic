@@ -65,13 +65,34 @@ check_dependency() {
 }
 
 ensure_brew() {
+    # Check if brew exists but isn't in PATH (common on fresh Apple Silicon Macs)
     if command -v brew &>/dev/null; then
+        return 0
+    elif [ -f /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+        return 0
+    elif [ -f /usr/local/bin/brew ]; then
+        eval "$(/usr/local/bin/brew shellenv)"
         return 0
     fi
 
+    # Check if user has admin/sudo access (required for Homebrew install)
+    if ! sudo -n true 2>/dev/null && ! dseditgroup -o checkmember -m "$(whoami)" admin &>/dev/null; then
+        echo ""
+        echo -e "  ${RED}${BOLD}Your user account is not an administrator.${NC}"
+        echo -e "  ${RED}Homebrew (and tmux/node) require admin access to install.${NC}"
+        echo ""
+        echo -e "  ${BOLD}Fix:${NC} Open ${CYAN}System Settings → Users & Groups${NC}"
+        echo -e "       Make your account an admin, then re-run this install."
+        echo ""
+        echo -e "  ${BOLD}Or:${NC} Ask an admin on this Mac to run:"
+        echo -e "       ${CYAN}brew install tmux node && npm install -g @anthropic-ai/claude-code${NC}"
+        echo ""
+        fail "Admin access required. Fix the above and re-run."
+    fi
+
     info "Installing Homebrew..."
-    # Homebrew needs /dev/tty for interactive prompts even when piped via curl | bash
-    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
     # Set up brew in current session
     if [ -f /opt/homebrew/bin/brew ]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
