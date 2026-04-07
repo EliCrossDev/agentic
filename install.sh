@@ -91,8 +91,9 @@ ensure_brew() {
         fail "Admin access required. Fix the above and re-run."
     fi
 
-    info "Installing Homebrew..."
-    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    info "Installing Homebrew (you may be prompted for your password)..."
+    # Redirect /dev/tty to stdin so sudo can prompt for password inside curl|bash
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
     # Set up brew in current session
     if [ -f /opt/homebrew/bin/brew ]; then
         eval "$(/opt/homebrew/bin/brew shellenv)"
