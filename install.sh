@@ -64,47 +64,80 @@ check_dependency() {
     fi
 }
 
+auto_install() {
+    local cmd="$1"
+    local name="$2"
+
+    if command -v "$cmd" &>/dev/null; then
+        success "$name is installed"
+        return 0
+    fi
+
+    info "Installing $name..."
+    if [ "$OS" = "macos" ]; then
+        if command -v brew &>/dev/null; then
+            brew install "$cmd" 2>/dev/null && success "Installed $name" && return 0
+        else
+            warn "Homebrew not found. Installing Homebrew first..."
+            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+            eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
+            brew install "$cmd" 2>/dev/null && success "Installed $name" && return 0
+        fi
+    else
+        if command -v apt-get &>/dev/null; then
+            sudo apt-get install -y "$cmd" 2>/dev/null && success "Installed $name" && return 0
+        elif command -v yum &>/dev/null; then
+            sudo yum install -y "$cmd" 2>/dev/null && success "Installed $name" && return 0
+        fi
+    fi
+
+    warn "Could not auto-install $name. Please install it manually."
+    return 1
+}
+
 check_dependencies() {
-    info "Checking dependencies..."
+    info "Checking and installing dependencies..."
     echo ""
 
     local missing=0
 
     # tmux
-    if ! check_dependency tmux "tmux" \
-        "$([ "$OS" = "macos" ] && echo "brew install tmux" || echo "sudo apt install tmux  OR  sudo yum install tmux")"; then
-        missing=1
-    fi
+    auto_install tmux "tmux" || missing=1
 
     # jq
-    if ! check_dependency jq "jq" \
-        "$([ "$OS" = "macos" ] && echo "brew install jq" || echo "sudo apt install jq  OR  sudo yum install jq")"; then
-        missing=1
-    fi
+    auto_install jq "jq" || missing=1
 
     # git
-    if ! check_dependency git "git" \
-        "$([ "$OS" = "macos" ] && echo "xcode-select --install" || echo "sudo apt install git  OR  sudo yum install git")"; then
-        missing=1
-    fi
-
-    # curl (needed for remote download)
-    if ! check_dependency curl "curl" \
-        "$([ "$OS" = "macos" ] && echo "brew install curl" || echo "sudo apt install curl  OR  sudo yum install curl")"; then
-        missing=1
+    if ! command -v git &>/dev/null; then
+        if [ "$OS" = "macos" ]; then
+            info "Installing git via Xcode Command Line Tools..."
+            xcode-select --install 2>/dev/null
+            warn "Xcode CLT install may open a dialog — accept it, then re-run this script."
+            missing=1
+        else
+            auto_install git "git" || missing=1
+        fi
+    else
+        success "git is installed"
     fi
 
     # Claude CLI
-    if ! check_dependency claude "Claude CLI" \
-        "npm install -g @anthropic-ai/claude-code  (requires Claude Pro subscription)"; then
-        missing=1
+    if ! command -v claude &>/dev/null; then
+        info "Installing Claude CLI..."
+        if command -v npm &>/dev/null; then
+            npm install -g @anthropic-ai/claude-code 2>/dev/null && success "Installed Claude CLI" || { warn "Claude CLI install failed. Run: npm install -g @anthropic-ai/claude-code"; missing=1; }
+        else
+            warn "npm not found. Install Node.js first, then: npm install -g @anthropic-ai/claude-code"
+            missing=1
+        fi
+    else
+        success "Claude CLI is installed"
     fi
 
     echo ""
 
     if [ "$missing" -eq 1 ]; then
-        warn "Some dependencies are missing. Install them and re-run this script."
-        # In pipe mode (curl | bash), stdin is not a TTY — skip interactive prompt and continue
+        warn "Some dependencies could not be installed automatically."
         if [ -t 0 ]; then
             echo ""
             read -p "  Continue anyway? (y/N) " -n 1 -r
