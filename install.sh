@@ -64,6 +64,29 @@ check_dependency() {
     fi
 }
 
+ensure_brew() {
+    if command -v brew &>/dev/null; then
+        return 0
+    fi
+
+    info "Installing Homebrew..."
+    # Homebrew needs /dev/tty for interactive prompts even when piped via curl | bash
+    NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
+    # Set up brew in current session
+    if [ -f /opt/homebrew/bin/brew ]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [ -f /usr/local/bin/brew ]; then
+        eval "$(/usr/local/bin/brew shellenv)"
+    fi
+
+    if command -v brew &>/dev/null; then
+        success "Installed Homebrew"
+        return 0
+    else
+        fail "Could not install Homebrew. Install it manually: https://brew.sh"
+    fi
+}
+
 auto_install() {
     local cmd="$1"
     local name="$2"
@@ -75,80 +98,45 @@ auto_install() {
 
     info "Installing $name..."
     if [ "$OS" = "macos" ]; then
-        if command -v brew &>/dev/null; then
-            brew install "$cmd" 2>/dev/null && success "Installed $name" && return 0
-        else
-            warn "Homebrew not found. Installing Homebrew first..."
-            /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-            eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null || /usr/local/bin/brew shellenv 2>/dev/null)"
-            brew install "$cmd" 2>/dev/null && success "Installed $name" && return 0
-        fi
+        ensure_brew
+        brew install "$cmd" 2>/dev/null && success "Installed $name" && return 0
     else
         if command -v apt-get &>/dev/null; then
+            sudo apt-get update -qq 2>/dev/null
             sudo apt-get install -y "$cmd" 2>/dev/null && success "Installed $name" && return 0
         elif command -v yum &>/dev/null; then
             sudo yum install -y "$cmd" 2>/dev/null && success "Installed $name" && return 0
         fi
     fi
 
-    warn "Could not auto-install $name. Please install it manually."
-    return 1
+    fail "Could not install $name."
 }
 
 check_dependencies() {
-    info "Checking and installing dependencies..."
+    info "Installing dependencies..."
     echo ""
 
-    local missing=0
+    # macOS: everything via brew. Linux: via apt/yum.
+    auto_install tmux "tmux"
+    auto_install jq "jq"
+    auto_install git "git"
 
-    # tmux
-    auto_install tmux "tmux" || missing=1
-
-    # jq
-    auto_install jq "jq" || missing=1
-
-    # git
-    if ! command -v git &>/dev/null; then
-        if [ "$OS" = "macos" ]; then
-            info "Installing git via Xcode Command Line Tools..."
-            xcode-select --install 2>/dev/null
-            warn "Xcode CLT install may open a dialog — accept it, then re-run this script."
-            missing=1
-        else
-            auto_install git "git" || missing=1
-        fi
+    # Node.js (needed for Claude CLI)
+    if ! command -v node &>/dev/null; then
+        auto_install node "Node.js"
     else
-        success "git is installed"
+        success "Node.js is installed"
     fi
 
     # Claude CLI
     if ! command -v claude &>/dev/null; then
         info "Installing Claude CLI..."
-        if command -v npm &>/dev/null; then
-            npm install -g @anthropic-ai/claude-code 2>/dev/null && success "Installed Claude CLI" || { warn "Claude CLI install failed. Run: npm install -g @anthropic-ai/claude-code"; missing=1; }
-        else
-            warn "npm not found. Install Node.js first, then: npm install -g @anthropic-ai/claude-code"
-            missing=1
-        fi
+        npm install -g @anthropic-ai/claude-code 2>/dev/null && success "Installed Claude CLI" || fail "Claude CLI install failed. Run: npm install -g @anthropic-ai/claude-code"
     else
         success "Claude CLI is installed"
     fi
 
     echo ""
-
-    if [ "$missing" -eq 1 ]; then
-        warn "Some dependencies could not be installed automatically."
-        if [ -t 0 ]; then
-            echo ""
-            read -p "  Continue anyway? (y/N) " -n 1 -r
-            echo ""
-            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                exit 1
-            fi
-        else
-            warn "Running non-interactively -- continuing with available dependencies"
-        fi
-    fi
 }
 
 # ─── Find Script Source Directory (local clone) ───────────────────────────────
