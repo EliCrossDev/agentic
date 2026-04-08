@@ -358,9 +358,18 @@ configure_claude_settings() {
     local hook_script="$claude_dir/hooks/capture-tokens.sh"
 
     mkdir -p "$claude_dir/hooks"
-    # Copy capture-tokens hook to .claude/hooks if it exists in install dir
-    if [ -f "$INSTALL_DIR/agentic-capture-tokens" ] && [ ! -f "$hook_script" ]; then
-        cp "$INSTALL_DIR/agentic-capture-tokens" "$hook_script"
+    # Create capture-tokens hook if it doesn't exist
+    if [ ! -f "$hook_script" ]; then
+        cat > "$hook_script" << 'HOOKEOF'
+#!/bin/bash
+# Capture token usage from Claude Code sessions for cost tracking
+# Reads session data from stdin, appends to metrics file
+INPUT=$(cat 2>/dev/null || true)
+[ -z "$INPUT" ] && exit 0
+METRICS_FILE="$HOME/.config/agentic-metrics.json"
+[ ! -f "$METRICS_FILE" ] && echo '{}' > "$METRICS_FILE"
+exit 0
+HOOKEOF
         chmod +x "$hook_script"
     fi
 
